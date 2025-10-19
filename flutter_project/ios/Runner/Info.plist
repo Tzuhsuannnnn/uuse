@@ -45,5 +45,11 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>需要使用相機以掃描QR Code</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>modadigitalwallet</string>
+	</array>
 </dict>
 </plist>

@@ -179,8 +179,8 @@ if __name__ == "__main__":
     transaction_id = main_workflow(test_ref)
 
     # 等使用者掃描完成後再查（按 Enter 繼續）
-    if transaction_id:
-        input("search")
-        get_verification_result(transaction_id, ACCESS_TOKEN)
-    else:
-        print("沒有可用的 transactionId，停止查詢。")
+    #if transaction_id:
+    #    input("search")
+    #    get_verification_result(transaction_id, ACCESS_TOKEN)
+    #else:
+    #    print("沒有可用的 transactionId，停止查詢。")
