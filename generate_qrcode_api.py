@@ -179,7 +179,8 @@ def view_result():
 
     # 交易資訊：預設金額 100，身份為已驗證學生時 9 折
     amount_val = 100.0
-    invoice_code = _extract_invoice_code(data)
+    # 動態抓取顯示標籤（來自第一個 claims 的 cname）與值
+    carrier_label, invoice_code = _extract_carrier_label_and_value(data)
     has_student = _has_verified_student(data)
     has_older = _has_verified_older(data)
     
@@ -199,10 +200,13 @@ def view_result():
     
     total_display = f"{total:.2f}"
 
+    # 預設標籤仍為「載具條碼」，若解析到 cname 則使用該值（例如「卡號」）
+    label_display = carrier_label or "載具條碼"
+
     summary_html = (
         f"<div class='card'>"
         f"<h2>交易資訊</h2>"
-        f"<div>載具條碼：<code>{invoice_code or '未提供'}</code></div>"
+        f"<div>{label_display}：<code>{invoice_code or '未提供'}</code></div>"
         f"<div>原價：<strong>{amount_val:.2f}</strong></div>"
         f"<div>身份：{identity_label}</div>"
         f"<div>總價：<strong>{total_display}</strong> {discount_note}</div>"
@@ -228,52 +232,90 @@ def _iter_objects(obj):
             yield from _iter_objects(item)
 
 #00000000_iris_easycard
-def _extract_invoice_code(data: dict):
+def _extract_carrier_label_and_value(data: dict):
     """
-    依照固定回傳格式直接抓取載具條碼：
-    - 找到 credentialType == "00000000_iris_invoice_code" 的物件
-    - 於其 "claims" 陣列中，找到 ename == "invoicenum" 或 cname == "載具條碼" 的項目
-    - 回傳該項目的 value 字串
+    依照固定回傳格式抓取顯示標籤與值：
+    - 支援多種 credentialType：
+      - 00000000_iris_invoice_code
+      - 00000000_iris_easycard
+    - 先嘗試於 claims/credentialSubject.claims 陣列中，尋找下列欄位名稱之一：
+      - ename: "invoicenum"（發票載具）
+      - cname: "載具條碼"
+      - ename: "easycard_ID"（悠遊卡）
+      - cname: "卡號"
+    - 若無上述欄位，fallback：回傳第一個 claims 的 cname 與其值（非空），以符合「顯示第一個 cname 與第一個值」的需求。
 
-    若上述路徑未找到，保守地回傳 None（或可擴充為其他 fallback）。
+    回傳：(label: Optional[str], value: Optional[str])
     """
-    target_type = "00000000_iris_invoice_code"
+    target_types = {"00000000_iris_invoice_code", "00000000_iris_easycard"}
+
+    # 可擴充的欄位名稱白名單（避免誤抓）
+    # 發票載具: invoicenum / 載具條碼
+    # 悠遊卡: easycard_ID / 卡號
+    recognized_enames = {"invoicenum", "easycard_ID"}
+    recognized_cnames = {"載具條碼", "卡號"}
+
+    def _extract_from_claims(claims_list):
+        if not isinstance(claims_list, list):
+            return None
+        for claim in claims_list:
+            if not isinstance(claim, dict):
+                continue
+            ename = claim.get("ename")
+            cname = claim.get("cname")
+            if (ename in recognized_enames) or (cname in recognized_cnames):
+                val = claim.get("value")
+                if isinstance(val, (str, int, float)) and str(val).strip():
+                    return {"label": cname or "載具條碼", "value": str(val)}
+        return None
 
     for node in _iter_objects(data):
         if not isinstance(node, dict):
             continue
-        if node.get("credentialType") != target_type:
+        if node.get("credentialType") not in target_types:
             continue
 
         # 直接從 claims 陣列找指定的欄位
-        claims = node.get("claims")
-        if isinstance(claims, list):
-            for claim in claims:
-                if not isinstance(claim, dict):
-                    continue
-                ename = claim.get("ename")
-                cname = claim.get("cname")
-                if ename == "invoicenum" or cname == "載具條碼":
-                    val = claim.get("value")
-                    if isinstance(val, (str, int, float)) and str(val).strip():
-                        return str(val)
+        claims1 = node.get("claims")
+        hit = _extract_from_claims(claims1)
+        if hit:
+            return hit.get("label"), hit.get("value")
 
         # 一些資料可能把 claims 放在 credentialSubject 底下
         cred_subj = node.get("credentialSubject")
         if isinstance(cred_subj, dict):
             claims2 = cred_subj.get("claims")
-            if isinstance(claims2, list):
-                for claim in claims2:
-                    if not isinstance(claim, dict):
-                        continue
-                    ename = claim.get("ename")
-                    cname = claim.get("cname")
-                    if ename == "invoicenum" or cname == "載具條碼":
-                        val = claim.get("value")
-                        if isinstance(val, (str, int, float)) and str(val).strip():
-                            return str(val)
+            hit = _extract_from_claims(claims2)
+            if hit:
+                return hit.get("label"), hit.get("value")
 
-    return None
+        # Fallback：若上述欄位名稱皆未命中，回傳該 credential 第一個 claim 的 value（非空）
+        # 以符合「載具條碼為第一個 claims 的第一個值」的需求。
+        def _first_non_empty_value(claims_list):
+            if not isinstance(claims_list, list):
+                return None
+            for claim in claims_list:
+                if not isinstance(claim, dict):
+                    continue
+                v = claim.get("value")
+                if isinstance(v, (str, int, float)) and str(v).strip():
+                    return {"label": claim.get("cname") or "載具條碼", "value": str(v)}
+            return None
+
+        v1 = _first_non_empty_value(claims1)
+        if v1:
+            return v1.get("label"), v1.get("value")
+        if isinstance(cred_subj, dict):
+            v2 = _first_non_empty_value(cred_subj.get("claims"))
+            if v2:
+                return v2.get("label"), v2.get("value")
+
+    return None, None
+
+def _extract_invoice_code(data: dict):
+    """保留舊介面：只回傳值（供現有呼叫者使用）。"""
+    _, value = _extract_carrier_label_and_value(data)
+    return value
 
 def _has_verified_student(data: dict) -> bool:
     target_type = "00000000_irisstudent"
