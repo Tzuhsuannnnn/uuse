@@ -126,7 +126,7 @@ class _ScanTabState extends State<ScanTab> with WidgetsBindingObserver {
     if (_isHandlingResult) return;
 
     // Extract the first non-empty value from the captured barcodes
-  String? value;
+    String? value;
     for (final b in capture.barcodes) {
       final v = b.rawValue ?? b.displayValue;
       if (v != null && v.isNotEmpty) {
@@ -135,8 +135,8 @@ class _ScanTabState extends State<ScanTab> with WidgetsBindingObserver {
       }
     }
 
-  if (value == null || !mounted) return;
-  final String result = value;
+    if (value == null || !mounted) return;
+    final String result = value;
 
     _isHandlingResult = true;
     try {
