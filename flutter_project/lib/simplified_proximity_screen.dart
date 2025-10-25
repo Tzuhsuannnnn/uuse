@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'dart:async';
+import 'package:url_launcher/url_launcher.dart';
+import '../services/backend_service.dart';
+import '../config/env.dart';
 
 class SimplifiedProximityScreen extends StatefulWidget {
   const SimplifiedProximityScreen({super.key});
@@ -27,10 +30,13 @@ class _SimplifiedProximityScreenState extends State<SimplifiedProximityScreen> {
   DateTime? _lastUpdate;
   bool _showGetClose = false;
   Timer? _getCloseTimer;
+  late final BackendService _backend;
 
   @override
   void initState() {
     super.initState();
+    // Initialize backend service
+    _backend = BackendService(baseUrl: kBackendBaseUrl);
     // Automatically start detection when screen opens
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _startDetection();
@@ -214,6 +220,8 @@ class _SimplifiedProximityScreenState extends State<SimplifiedProximityScreen> {
           const SnackBar(content: Text('get close'), duration: Duration(seconds: 2)),
         );
       }
+      // Trigger MRT quick action
+      _handleQuickActionTap('00000000_iris_enter_mrt');
     }
   }
 
@@ -221,6 +229,50 @@ class _SimplifiedProximityScreenState extends State<SimplifiedProximityScreen> {
     if (!_deviceFound) return Colors.grey;
     if (_currentRssi > -50) return Colors.red; // far - red color
     return Colors.green; // close - green color
+  }
+
+  Future<void> _handleQuickActionTap(String ref) async {
+    // Lightweight modal progress
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    try {
+      final resp = await _backend.generateByRef(ref);
+      final authUriStr = (resp['authUri'] ?? resp['auth_uri']) as String?;
+      if (authUriStr == null || authUriStr.isEmpty) {
+        _showSnack('未取得 authUri，請稍後重試');
+        return;
+      }
+
+      final uri = Uri.parse(authUriStr);
+      final can = await canLaunchUrl(uri);
+      if (!can) {
+        _showSnack('無法開啟連結');
+        return;
+      }
+
+      final isHttp = uri.scheme == 'http' || uri.scheme == 'https';
+      await launchUrl(
+        uri,
+        mode: isHttp
+            ? LaunchMode.inAppBrowserView
+            : LaunchMode.externalApplication,
+      );
+    } catch (e) {
+      _showSnack('操作失敗：$e');
+    } finally {
+      if (context.mounted) Navigator.of(context).pop();
+    }
+  }
+
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg)),
+    );
   }
 
   @override
