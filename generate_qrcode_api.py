@@ -1,5 +1,10 @@
 from flask import Flask, request, jsonify, Response, make_response,redirect
 import os
+from functools import wraps
+from dotenv import load_dotenv
+from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from generate_qrcode import (
     get_qrcode_image,
     save_base64_to_png,
@@ -8,11 +13,63 @@ from generate_qrcode import (
     ACCESS_TOKEN,
 )
 import json
+from datetime import datetime, timedelta
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 
-# 儲存最後一次產生的結果
-last_result = {"transactionId": None, "authUri": None, "image": None, "ref": None}
+# Security: CORS configuration - only allow specific origins
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["http://localhost:*", "http://127.0.0.1:*"],  # 只允許本地開發
+        "methods": ["GET", "POST"],
+        "allow_headers": ["Content-Type", "X-API-Key"]
+    }
+})
+
+# Security: Rate limiting to prevent abuse
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",
+)
+
+# Security: API Key from environment
+API_KEY = os.getenv('API_KEY', '')
+if not API_KEY:
+    raise ValueError("API_KEY not found in environment variables. Please set it in .env file.")
+
+# Security: Whitelist of valid ref values
+VALID_REFS = {
+    '00000000_iris_enter_mrt',
+    '00000000_iris_invoice_code',
+    '00000000_iris_easycard',
+    '00000000_irisstudent',
+    '00000000_irisold',
+}
+
+# Security: Time-limited sensitive data storage (expires after 10 minutes)
+last_result = {"transactionId": None, "authUri": None, "image": None, "ref": None, "expires_at": None}
+
+def require_api_key(f):
+    """Decorator to require API Key authentication"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        api_key = request.headers.get('X-API-Key')
+        if not api_key or api_key != API_KEY:
+            app.logger.warning(f"Unauthorized access attempt from {request.remote_addr}")
+            return jsonify({"error": "Unauthorized. Valid API Key required."}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+def clear_expired_data():
+    """Clear sensitive data if expired"""
+    if last_result.get("expires_at"):
+        if datetime.now() > last_result["expires_at"]:
+            last_result.update({"transactionId": None, "authUri": None, "image": None, "ref": None, "expires_at": None})
 @app.route("/health", methods=["GET"])
 def health():
     """Simple liveness check to verify network reachability from devices."""
@@ -22,54 +79,92 @@ def health():
 
 
 @app.route("/api/generate_by_ref", methods=["POST"])
+@limiter.limit("10 per minute")  # 每分鐘最多 10 次請求
+@require_api_key
 def api_generate_by_ref():
     """
     POST JSON: {"ref": "<ref_value>"}
+    Headers: {"X-API-Key": "your-api-key"}
     回傳 JSON: {"transactionId": "...", "authUri": "...", "image": "<filepath>"}
     """
-    data = request.get_json() or {}
+    try:
+        data = request.get_json() or {}
+        ref = data.get("ref")
+        
+        # Input validation
+        if not ref:
+            return jsonify({"error": "missing ref"}), 400
+        
+        # Whitelist validation
+        if ref not in VALID_REFS:
+            app.logger.warning(f"Invalid ref attempted: {ref} from {request.remote_addr}")
+            return jsonify({"error": "invalid ref value"}), 400
+    except Exception as e:
+        app.logger.error(f"Request validation error: {str(e)}")
+        return jsonify({"error": "Invalid request format"}), 400
+    
     ref = data.get("ref")
     if not ref:
         return jsonify({"error": "missing ref"}), 400
 
-    transaction_id = generate_new_transaction_id()
-    api_resp = get_qrcode_image(ref, ACCESS_TOKEN, transaction_id)
-    if not api_resp:
-        return jsonify({"error": "qrcode api call failed"}), 502
+    try:
+        transaction_id = generate_new_transaction_id()
+        api_resp = get_qrcode_image(ref, ACCESS_TOKEN, transaction_id)
+        if not api_resp:
+            app.logger.error("Failed to get QR code from external API")
+            return jsonify({"error": "Service temporarily unavailable"}), 502
 
-    # 取回可能的 transactionId / qrcode / authUri
-    tid = api_resp.get("transactionId", transaction_id)
-    qrcode_b64 = api_resp.get("qrcodeImage")
-    auth_uri = api_resp.get("authUri")
+        # 取回可能的 transactionId / qrcode / authUri
+        tid = api_resp.get("transactionId", transaction_id)
+        qrcode_b64 = api_resp.get("qrcodeImage")
+        auth_uri = api_resp.get("authUri")
 
-    image_path = None
-    if qrcode_b64:
-        try:
-            image_path = save_base64_to_png(qrcode_b64, ref)
-        except Exception as e:
-            # 儲存失敗但不阻擋回傳
-            image_path = None
-            app.logger.warning(f"save image failed: {e}")
+        image_path = None
+        if qrcode_b64:
+            try:
+                image_path = save_base64_to_png(qrcode_b64, ref)
+            except Exception as e:
+                # 儲存失敗但不阻擋回傳
+                image_path = None
+                app.logger.warning(f"save image failed: {e}")
 
-    last_result.update({"transactionId": tid, "authUri": auth_uri, "image": image_path, "ref": ref})
-    return jsonify({"transactionId": tid, "authUri": auth_uri, "image": image_path})
+        # Security: Set expiration time for sensitive data (10 minutes)
+        expires_at = datetime.now() + timedelta(minutes=10)
+        last_result.update({
+            "transactionId": tid, 
+            "authUri": auth_uri, 
+            "image": image_path, 
+            "ref": ref,
+            "expires_at": expires_at
+        })
+        return jsonify({"transactionId": tid, "authUri": auth_uri, "image": image_path})
+    except Exception as e:
+        app.logger.error(f"Error in generate_by_ref: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route("/api/result", methods=["POST"])
+@limiter.limit("20 per minute")  # 查詢結果允許較高頻率
+@require_api_key
 def api_result():
     """
     POST JSON: {"transactionId": "..."}
+    Headers: {"X-API-Key": "your-api-key"}
     直接呼叫 get_verification_result 並回傳原始結果
     """
-    data = request.get_json() or {}
-    tid = data.get("transactionId")
-    if not tid:
-        return jsonify({"error": "missing transactionId"}), 400
+    try:
+        data = request.get_json() or {}
+        tid = data.get("transactionId")
+        if not tid:
+            return jsonify({"error": "missing transactionId"}), 400
 
-    result = get_verification_result(tid, ACCESS_TOKEN)
-    if result is None:
-        return jsonify({"error": "query failed or no result yet"}), 502
-    return jsonify(result)
+        result = get_verification_result(tid, ACCESS_TOKEN)
+        if result is None:
+            return jsonify({"error": "Verification result not available yet"}), 404
+        return jsonify(result)
+    except Exception as e:
+        app.logger.error(f"Error in api_result: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 
