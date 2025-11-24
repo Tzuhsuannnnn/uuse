@@ -5,9 +5,16 @@ import base64
 import json
 import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # --- 配置區 ---
-ACCESS_TOKEN = "oysqK0MuMAhL2lS4RbC9UxmvR80gfubf" 
+ACCESS_TOKEN = os.getenv('IRIS_ACCESS_TOKEN', '')
+if not ACCESS_TOKEN:
+    raise ValueError("IRIS_ACCESS_TOKEN not found in environment variables. Please set it in .env file.")
+    
 API_BASE_URL = "https://verifier-sandbox.wallet.gov.tw/api/oidvp/qrcode"
 # --- 配置區 ---
 

@@ -561,4 +561,4 @@ def _has_verified_older(data: dict) -> bool:
 
 if __name__ == "__main__":
     # 執行：在 uuse 資料夾啟動 python generate_qrcode_api.py
-    app.run(host="0.0.0.0", port=5001, debug=False)
+    app.run(host="127.0.0.1", port=5001, debug=False)
