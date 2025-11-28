@@ -46,7 +46,7 @@ jobs:
         with:
           channel: "stable"
           
-      # The analysis requires to retrieve dependencies and build successfully
+      # The analysis requires  to retrieve dependencies and build successfully
       - name: Build
         working-directory: ./flutter_project
         run: |
