@@ -472,7 +472,7 @@ def view_result():
     
     # Add carrier information if available
     if invoice_code:
-        label_display = carrier_label or "載具條碼"
+        label_display = carrier_label or "載具條碼 "
         body += f"""
 <div class='receipt-row'>
 <span class='receipt-label'>{label_display}</span>
