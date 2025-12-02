@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from markupsafe import escape
 from generate_qrcode import (
     get_qrcode_image,
     save_base64_to_png,
@@ -170,13 +171,14 @@ def api_result():
 
 
 def _html_page(title: str, body_html: str) -> Response:
+    safe_title = escape(title)
     html = f"""
 <!doctype html>
 <html lang=zh-Hant>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{title}</title>
+  <title>{safe_title}</title>
   <style>
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     body {{ 
@@ -403,6 +405,7 @@ def view_result():
         )
         return _html_page("POS 收銀系統", body)
     
+    safe_tid = escape(tid)
       
     data = get_verification_result(tid, ACCESS_TOKEN)
     if data is None:
@@ -416,7 +419,7 @@ def view_result():
             "<h2>等待驗證結果</h2>"
             "<p>正在驗證數位身份證件<br>請稍後...</p>"
             "</div>"
-            f"<div class='transaction-id'>交易序號: {tid}</div>"
+            f"<div class='transaction-id'>交易序號: {safe_tid}</div>"
             "</div>"
         )
         return _html_page("POS 收銀系統 - 處理中", body)
@@ -433,19 +436,16 @@ def view_result():
     if has_student:
         total = amount_val * 0.9
         identity_label = "學生"
-        status_class = "status-verified"
         discount_amount = amount_val * 0.1
         discount_note = "-10%"
     elif has_older:
         total = amount_val * 0.8
         identity_label = "長者"
-        status_class = "status-verified"
         discount_amount = amount_val * 0.2
         discount_note = "-20%"
     else:
         total = amount_val
         identity_label = "一般"
-        status_class = "status-verified"
         discount_note = ""
     
     verification_status = "已驗證" if data.get("verifyResult") else "待驗證"
@@ -472,7 +472,7 @@ def view_result():
     
     # Add carrier information if available
     if invoice_code:
-        label_display = carrier_label or "載具條碼"
+        label_display = carrier_label or "載具條碼 "
         body += f"""
 <div class='receipt-row'>
 <span class='receipt-label'>{label_display}</span>
@@ -517,7 +517,7 @@ def view_result():
     
     body += f"""
 </div>
-<div class='transaction-id'>交易序號: {tid}</div>
+<div class='transaction-id'>交易序號: {safe_tid}</div>
 </div>
 """
 
@@ -538,84 +538,63 @@ def _iter_objects(obj):
         for item in obj:
             yield from _iter_objects(item)
 
-#00000000_iris_easycard
+def _find_claim_in_list(claims_list, recognized_enames, recognized_cnames):
+    """Helper to find a recognized claim in a list of claims."""
+    if not isinstance(claims_list, list):
+        return None
+    for claim in claims_list:
+        if not isinstance(claim, dict):
+            continue
+        ename = claim.get("ename")
+        cname = claim.get("cname")
+        if (ename in recognized_enames) or (cname in recognized_cnames):
+            val = claim.get("value")
+            if isinstance(val, (str, int, float)) and str(val).strip():
+                return {"label": cname or "載具條碼", "value": str(val)}
+    return None
+
+def _find_first_non_empty_claim(claims_list):
+    """Helper to find the first non-empty claim as a fallback."""
+    if not isinstance(claims_list, list):
+        return None
+    for claim in claims_list:
+        if not isinstance(claim, dict):
+            continue
+        v = claim.get("value")
+        if isinstance(v, (str, int, float)) and str(v).strip():
+            return {"label": claim.get("cname") or "載具條碼", "value": str(v)}
+    return None
+
 def _extract_carrier_label_and_value(data: dict):
     """
-    依照固定回傳格式抓取顯示標籤與值：
-    - 支援多種 credentialType：
-      - 00000000_iris_invoice_code
-      - 00000000_iris_easycard
-    - 先嘗試於 claims/credentialSubject.claims 陣列中，尋找下列欄位名稱之一：
-      - ename: "invoicenum"（發票載具）
-      - cname: "載具條碼"
-      - ename: "easycard_ID"（悠遊卡）
-      - cname: "卡號"
-    - 若無上述欄位，fallback：回傳第一個 claims 的 cname 與其值（非空），以符合「顯示第一個 cname 與第一個值」的需求。
-
-    回傳：(label: Optional[str], value: Optional[str])
+    Extracts a display label and value from the data structure based on credential types.
+    - Supports '00000000_iris_invoice_code' and '00000000_iris_easycard'.
+    - Searches for specific claim names ('invoicenum', 'easycard_ID', etc.).
+    - Falls back to the first non-empty claim if specific ones are not found.
+    Returns: (label: Optional[str], value: Optional[str])
     """
     target_types = {"00000000_iris_invoice_code", "00000000_iris_easycard"}
-
-    # 可擴充的欄位名稱白名單（避免誤抓）
-    # 發票載具: invoicenum / 載具條碼
-    # 悠遊卡: easycard_ID / 卡號
     recognized_enames = {"invoicenum", "easycard_ID"}
     recognized_cnames = {"載具條碼", "卡號"}
 
-    def _extract_from_claims(claims_list):
-        if not isinstance(claims_list, list):
-            return None
-        for claim in claims_list:
-            if not isinstance(claim, dict):
-                continue
-            ename = claim.get("ename")
-            cname = claim.get("cname")
-            if (ename in recognized_enames) or (cname in recognized_cnames):
-                val = claim.get("value")
-                if isinstance(val, (str, int, float)) and str(val).strip():
-                    return {"label": cname or "載具條碼", "value": str(val)}
-        return None
-
     for node in _iter_objects(data):
-        if not isinstance(node, dict):
-            continue
-        if node.get("credentialType") not in target_types:
+        if not isinstance(node, dict) or node.get("credentialType") not in target_types:
             continue
 
-        # 直接從 claims 陣列找指定的欄位
-        claims1 = node.get("claims")
-        hit = _extract_from_claims(claims1)
-        if hit:
-            return hit.get("label"), hit.get("value")
-
-        # 一些資料可能把 claims 放在 credentialSubject 底下
+        claims_sources = [node.get("claims")]
         cred_subj = node.get("credentialSubject")
         if isinstance(cred_subj, dict):
-            claims2 = cred_subj.get("claims")
-            hit = _extract_from_claims(claims2)
+            claims_sources.append(cred_subj.get("claims"))
+
+        # Search for recognized claims, then fallback to first non-empty
+        for claims in claims_sources:
+            hit = _find_claim_in_list(claims, recognized_enames, recognized_cnames)
             if hit:
                 return hit.get("label"), hit.get("value")
-
-        # Fallback：若上述欄位名稱皆未命中，回傳該 credential 第一個 claim 的 value（非空）
-        # 以符合「載具條碼為第一個 claims 的第一個值」的需求。
-        def _first_non_empty_value(claims_list):
-            if not isinstance(claims_list, list):
-                return None
-            for claim in claims_list:
-                if not isinstance(claim, dict):
-                    continue
-                v = claim.get("value")
-                if isinstance(v, (str, int, float)) and str(v).strip():
-                    return {"label": claim.get("cname") or "載具條碼", "value": str(v)}
-            return None
-
-        v1 = _first_non_empty_value(claims1)
-        if v1:
-            return v1.get("label"), v1.get("value")
-        if isinstance(cred_subj, dict):
-            v2 = _first_non_empty_value(cred_subj.get("claims"))
-            if v2:
-                return v2.get("label"), v2.get("value")
+            
+            fallback = _find_first_non_empty_claim(claims)
+            if fallback:
+                return fallback.get("label"), fallback.get("value")
 
     return None, None
 
