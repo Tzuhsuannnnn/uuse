@@ -1,6 +1,7 @@
 # uuse
 
 A Flutter mobile application with Flask API backend for credential presentation and proximity-based interactions.
+Awarded 1st Place in the Digital Credential/Certificate Innovation Competition
 
 ## Overview
 
